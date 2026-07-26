@@ -30,9 +30,7 @@ from agent_graph import run_full_agent
 st.set_page_config(page_title="Cloud Cost Optimization Agent", page_icon="🤖")
 
 st.title("🤖 Cloud Cost Optimization Agent")
-st.caption(
-    "Orchestrated agent: retrieves policy knowledge, reasons, reflects, then acts only with your approval."
-)
+st.caption("Orchestrated agent: retrieves policy knowledge, reasons, reflects, then acts only with your approval.")
 
 if "stopped_instances" not in st.session_state:
     st.session_state.stopped_instances = set()
@@ -84,37 +82,33 @@ for instance in real_instances:
             if btn_col1.button("🛑 Confirm Stop", key=f"stop_{instance_id}"):
                 with st.spinner("Executing approved action and verifying..."):
                     final_result = run_full_agent(instance, human_approved=True)
-                if final_result["verified_state"] in ("stopped", "stopping"):
+                if final_result["action_taken"] == "blocked":
+                    st.error(f"🛡️ Guardrail blocked this action: {final_result['guardrail_message']}")
+                elif final_result["verified_state"] in ("stopped", "stopping"):
                     st.session_state.stopped_instances.add(instance_id)
                     st.rerun()
                 else:
-                    st.error(
-                        f"Stop sent, but state is '{final_result['verified_state']}'. Check AWS console."
-                    )
+                    st.error(f"Stop sent, but state is '{final_result['verified_state']}'. Check AWS console.")
             if btn_col2.button("Override / Ignore", key=f"ignore_{instance_id}"):
                 st.write("Agent's suggestion overridden. Instance left running.")
 
         elif result["wants_to_act"] and not result["reflection_passed"]:
             # Agent initially leaned toward stopping, but its own reflection
             # raised unresolved doubts (and the retry loop didn't clear them).
-            st.info(
-                "🤖 AGENT DECISION: Flagged for review, but not confident enough to recommend"
-            )
+            st.info("🤖 AGENT DECISION: Flagged for review, but not confident enough to recommend")
             st.write(f"**Initial reasoning:** {result['reasoning']}")
             st.write(f"**Reflection's concern:** {result['reflection_notes']}")
 
-            if st.button(
-                "🛑 Stop anyway (manual override)", key=f"forcestop_{instance_id}"
-            ):
+            if st.button("🛑 Stop anyway (manual override)", key=f"forcestop_{instance_id}"):
                 with st.spinner("Executing manual override and verifying..."):
                     final_result = run_full_agent(instance, human_approved=True)
-                if final_result["verified_state"] in ("stopped", "stopping"):
+                if final_result["action_taken"] == "blocked":
+                    st.error(f"🛡️ Guardrail blocked this action: {final_result['guardrail_message']}")
+                elif final_result["verified_state"] in ("stopped", "stopping"):
                     st.session_state.stopped_instances.add(instance_id)
                     st.rerun()
                 else:
-                    st.error(
-                        f"Stop sent, but state is '{final_result['verified_state']}'. Check AWS console."
-                    )
+                    st.error(f"Stop sent, but state is '{final_result['verified_state']}'. Check AWS console.")
 
         else:
             st.success("🤖 AGENT DECISION: No action needed")

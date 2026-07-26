@@ -38,6 +38,7 @@ from langgraph.graph import StateGraph, START, END
 from rag_retriever import retrieve_relevant_docs
 from memory_store import summarize_history_for_prompt, log_decision
 from step4_stop_and_verify import stop_instance, verify_stopped
+from guardrails import validate_tool_call, record_action_taken, GuardrailViolation
 
 import os
 import json
@@ -75,9 +76,10 @@ class AgentState(TypedDict):
     reflection_notes: str          # self-check output
     reflection_passed: bool        # did the self-check approve the decision?
     reflection_loops: int          # safety counter to avoid infinite loops
-    action_taken: Optional[str]    # "stopped" | "no_action"
+    action_taken: Optional[str]    # "stopped" | "no_action" | "blocked"
     verified_state: Optional[str]  # AWS state after verification
     human_approved: Optional[bool] # set by the caller (dashboard/CLI) before act
+    guardrail_message: Optional[str]  # set if a guardrail blocked the action
 
 
 # -----------------------------------------
@@ -191,15 +193,27 @@ def route_after_reflection(state: AgentState) -> str:
 # 6. Node: Act (only reached if a human has approved, checked by caller)
 # -----------------------------------------
 def act_node(state: AgentState) -> dict:
-    instance_id = state["instance"]["instance_id"]
+    instance = state["instance"]
+    instance_id = instance["instance_id"]
 
     if not state.get("human_approved"):
         # Caller (dashboard/CLI) hasn't approved yet - do nothing.
-        log_decision(instance_id, state["instance"], state["reasoning"], "no_action", "Awaiting human approval")
+        log_decision(instance_id, instance, state["reasoning"], "no_action", "Awaiting human approval")
         return {"action_taken": "no_action"}
 
+    # GUARDRAILS: validate before touching real AWS, regardless of how
+    # confident the agent (or the human) is. Any failure here blocks the
+    # action entirely - no override, since these are safety-critical checks,
+    # not judgment calls.
+    try:
+        validate_tool_call(instance, instance_id, state["reasoning"])
+    except GuardrailViolation as e:
+        log_decision(instance_id, instance, state["reasoning"], "blocked", str(e))
+        return {"action_taken": "blocked", "guardrail_message": str(e)}
+
     stop_instance(instance_id)
-    log_decision(instance_id, state["instance"], state["reasoning"], "stopped")
+    record_action_taken()
+    log_decision(instance_id, instance, state["reasoning"], "stopped")
     return {"action_taken": "stopped"}
 
 
@@ -259,6 +273,7 @@ def run_full_agent(instance, human_approved=False):
         "reflection_loops": 0,
         "action_taken": None,
         "verified_state": None,
-        "human_approved": human_approved
+        "human_approved": human_approved,
+        "guardrail_message": None
     }
     return agent_graph.invoke(initial_state)
