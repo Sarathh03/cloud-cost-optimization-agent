@@ -1,0 +1,41 @@
+[
+  {
+    "timestamp": "2026-07-26T05:57:46.729732+00:00",
+    "instance_id": "i-testonly123",
+    "instance_data": {
+      "state": "running",
+      "cpu_percent": 0.0
+    },
+    "reasoning": "Test entry - idle after training.",
+    "action_taken": "no_action",
+    "outcome": "Overridden by user"
+  },
+  {
+    "timestamp": "2026-07-26T06:30:48.090138+00:00",
+    "instance_id": "i-074b998100d7f0eee",
+    "instance_data": {
+      "instance_id": "i-074b998100d7f0eee",
+      "state": "running",
+      "cpu_percent": 0.27,
+      "training_status": "completed",
+      "runtime_hours": 0.56
+    },
+    "reasoning": "The instance has completed its training job and its CPU utilization is very low, making it safe to stop according to the post-training instance handling policy and idle instance policy.",
+    "action_taken": "no_action",
+    "outcome": "Awaiting human approval"
+  },
+  {
+    "timestamp": "2026-07-26T06:34:46.204433+00:00",
+    "instance_id": "i-074b998100d7f0eee",
+    "instance_data": {
+      "instance_id": "i-074b998100d7f0eee",
+      "state": "running",
+      "cpu_percent": 0.24,
+      "training_status": "completed",
+      "runtime_hours": 0.62
+    },
+    "reasoning": "The instance has completed its training job, its CPU utilization is below 10% and there is no active job running, aligning with both the post-training instance handling and idle instance policies.",
+    "action_taken": "stopped",
+    "outcome": null
+  }
+]

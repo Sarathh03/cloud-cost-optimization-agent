@@ -21,62 +21,108 @@ All of this is shown live in a Streamlit dashboard.
 
 ---
 
-## Where the "Agents" Actually Are
+# 🤖 Cloud Cost Optimization Agent
 
-The original design used the word "agent" for every stage (Monitor Agent,
-Diagnosis Agent, Action Agent, Verify Agent). In the actual build, only
-**one part uses AI** — the rest are deterministic, rule-based code. This
-was an intentional choice: predictable, testable behavior everywhere
-except the one place AI adds real value (turning a decision into a
-human-readable sentence).
-
-| Stage | AI Involved? | What It Really Is | File |
-|---|---|---|---|
-| Monitor | ❌ No | Reads real EC2 state + CloudWatch CPU data via `boto3` | `step3_aws_real_data.py` |
-| Diagnosis | ❌ No | Rule-based `if/else` logic — no model involved | `step1_fake_data_and_rules.py` |
-| **Explanation** | ✅ **Yes** | Sends the rule engine's output to an LLM (Groq, Llama 3.3 70B) to write a plain-English explanation | `step2_groq_explanation.py` |
-| Action | ❌ No | Calls AWS's `stop_instances` API directly | `step4_stop_and_verify.py` |
-| Verify | ❌ No | Re-calls AWS's `describe_instances` API to confirm the new state | `step4_stop_and_verify.py` |
-
-**In one sentence:** rule-based logic handles detection, diagnosis, action,
-and verification reliably; an LLM is used only for the human-facing
-explanation, keeping the system's actual decisions safe and predictable.
+An orchestrated Agentic AI system that monitors real AWS EC2 instances,
+retrieves relevant cost-optimization policy knowledge, reasons about
+whether an instance is wasteful, reflects on its own decision, and — only
+with human approval — stops the instance and verifies the result.
 
 ---
 
-## Architecture / Flow
+## What This Project Does
+
+1. **Monitor** — reads real EC2 state, CPU usage, tags, and uptime via `boto3`
+2. **Retrieve (RAG)** — searches a knowledge base of cost-optimization
+   policies for guidance relevant to this instance's situation
+3. **Diagnose** — an LLM reasons over the instance data + retrieved policy
+   knowledge + past decisions, and decides whether to propose stopping it
+   (via tool calling — the model chooses the action, not `if/else` code)
+4. **Reflect** — the agent double-checks its own decision before acting,
+   and can reject its own proposal or loop back to re-diagnose
+5. **Act** — only after a human confirms, the agent calls AWS's real
+   `stop_instances` API
+6. **Verify** — re-checks AWS to confirm the action actually worked
+7. **Remember** — every decision (data seen, reasoning, action, outcome)
+   is logged, so future runs on the same instance have memory of the past
+
+All of this is orchestrated as an explicit graph (LangGraph) and shown
+live in a Streamlit dashboard.
+
+---
+
+## Why This Counts as Agentic AI (Not Just Automation)
+
+An earlier version of this project used `if/else` rules to detect
+waste, with an LLM only writing a friendly sentence about a decision
+the code already made. That is **automation with an AI narrator**, not
+an agent.
+
+This version is different: the LLM is handed raw instance data plus
+retrieved policy knowledge and **decides for itself**, via tool calling,
+whether the situation warrants action. It then **checks its own
+reasoning** in a separate reflection step before anything happens. That
+loop — perceive → retrieve → reason → reflect → (approved) act → verify
+— is what makes this a genuine agentic AI system rather than a rule
+engine with an AI-generated caption.
+
+---
+
+## Agentic AI Components (Mapped to Core Concepts)
+
+| Concept | Implementation | File |
+|---|---|---|
+| **Agent / Reasoning** | LLM (Groq, Llama 3.3 70B) decides via tool calling whether to act | `agent_graph.py` (`diagnose_node`) |
+| **Orchestration** | LangGraph `StateGraph` with 5 nodes and conditional routing | `agent_graph.py` |
+| **Agentic RAG** | TF-IDF retrieval over a policy knowledge base, run before every decision | `knowledge_base.py`, `rag_retriever.py` |
+| **Memory / State** | JSON-based decision log; past decisions per instance are recalled in the reasoning prompt | `memory_store.py` |
+| **Reflection / Self-correction** | A second LLM call critiques the first decision; can reject and trigger a re-diagnose loop (max 2 loops, then defers to human) | `agent_graph.py` (`reflect_node`, `route_after_reflection`) |
+| **Tool use** | `stop_instance` exposed to the LLM as a callable tool via function calling | `agent_graph.py` |
+| **Human-in-the-loop** | Action only executes after explicit dashboard confirmation | `app.py`, `agent_graph.py` (`act_node`) |
+| **Monitoring / Environment sensing** | Real EC2 state + CloudWatch CPU + real uptime via `boto3` | `step3_aws_real_data.py` |
+| **Action + Verification** | Real AWS API calls to stop and re-check instance state | `step4_stop_and_verify.py` |
+
+---
+
+## Orchestration Graph
 
 ```
-   EC2 + CloudWatch (real AWS data)
-              │
-              ▼
-   ┌─────────────────────┐
-   │   Rule Engine        │   <-- if/else logic, no AI
-   │  (detect_anomaly)     │
-   └─────────┬────────────┘
-              │  anomaly found?
-              ▼
-   ┌─────────────────────┐
-   │   LLM Explanation     │   <-- only AI step (Groq)
-   │  (explain_with_groq)  │
-   └─────────┬────────────┘
-              │
-              ▼
-   ┌─────────────────────┐
-   │  Streamlit Dashboard  │   <-- shows everything, has Stop button
-   └─────────┬────────────┘
-              │  user clicks "Stop Instance"
-              ▼
-   ┌─────────────────────┐
-   │   Stop Action         │   <-- real AWS API call
-   │  (stop_instance)      │
-   └─────────┬────────────┘
-              │
-              ▼
-   ┌─────────────────────┐
-   │   Verification         │   <-- re-checks AWS state
-   │  (verify_stopped)      │
-   └─────────────────────┘
+                 START
+                   │
+                   ▼
+        ┌─────────────────────┐
+        │  retrieve_knowledge   │   <- Agentic RAG: searches policy docs
+        └──────────┬───────────┘
+                    │
+                    ▼
+        ┌─────────────────────┐
+        │      diagnose          │◄──────────────┐   <- LLM decides via tool calling,
+        └──────────┬───────────┘                │      using retrieved knowledge + memory
+                    │                             │
+                    ▼                             │
+        ┌─────────────────────┐                 │
+        │       reflect          │                 │   <- LLM self-checks its own decision
+        └──────────┬───────────┘                │
+                    │                             │
+           ┌────────┴────────┐                   │
+           ▼                 ▼                   │
+     [approved]      [rejected, retry] ───────────┘
+           │           (max 2 loops)
+           │
+     [not wanting to act] ──► END
+           │
+           ▼
+        ┌───────┐
+        │  act    │   <- only runs if human_approved=True
+        └───┬───┘
+            │
+            ▼
+        ┌───────┐
+        │ verify  │   <- re-checks real AWS state
+        └───┬───┘
+            │
+            ▼
+           END
 ```
 
 ---
@@ -85,34 +131,58 @@ explanation, keeping the system's actual decisions safe and predictable.
 
 | File | Purpose |
 |---|---|
-| `step1_fake_data_and_rules.py` | Fake instance data (for early testing) + the rule engine (`detect_anomaly`) that both fake and real data run through |
-| `step2_groq_explanation.py` | Sends anomaly details to Groq's LLM API and returns a plain-English explanation |
-| `step3_aws_real_data.py` | Pulls real EC2 instance state + CloudWatch CPU usage via `boto3`, shaped to match the fake data format |
-| `step4_stop_and_verify.py` | Stops a real EC2 instance and verifies the stop actually happened |
-| `app.py` | The Streamlit dashboard tying everything together, with real Stop/Verify wired in |
+| `knowledge_base.py` | The knowledge source — cost-optimization policy documents |
+| `rag_retriever.py` | TF-IDF retrieval over the knowledge base (the "R" in RAG) |
+| `memory_store.py` | Persistent decision log + recall of past decisions per instance |
+| `agent_graph.py` | LangGraph orchestration: retrieve → diagnose → reflect → act → verify |
+| `step3_aws_real_data.py` | Real EC2/CloudWatch monitoring via `boto3`, including real uptime |
+| `step4_stop_and_verify.py` | Real AWS stop action + verification |
+| `app.py` | Streamlit dashboard — the full agent, visualized |
+| `step1_fake_data_and_rules.py`, `step2_groq_explanation.py`, `step5_agentic_ai.py` | Earlier development stages, kept for the rule-based-vs-agentic comparison (see below) |
 
 ---
 
-## How It Was Built (Development Order)
+## Development Order (Why It Was Built This Way)
 
-We deliberately built this in a "fake data first" order, so every layer
-could be tested without touching AWS or spending money:
+We built this in layers, testing each one independently before wiring
+it into the next, so every component could be verified in isolation:
 
-1. **Fake data + rule engine** — hardcoded a few sample instances,
-   wrote `if/else` rules to catch obvious waste patterns, tested by
-   manually editing values and re-running.
-2. **LLM explanation** — connected Groq's API, sent the rule engine's
-   output as a prompt, confirmed it returned clean plain-English text.
-3. **Streamlit dashboard** — built a visual UI showing the same fake
-   data with Stop/Ignore buttons (Stop only simulated at this stage).
-4. **Real AWS data** — created a limited, read-only IAM user, launched
-   one Free Tier `t2.micro` EC2 instance, and replaced the fake data
-   function with a real `boto3` call to `describe_instances` +
-   CloudWatch's `get_metric_statistics`.
-5. **Real Stop + Verify** — expanded the IAM user with a narrow custom
-   policy (`ec2:StopInstances`, `ec2:DescribeInstances` only — nothing
-   else), then wired the dashboard's Stop button to actually call AWS
-   and confirm the result.
+1. **Fake data + rule engine** — validated basic detection logic with
+   no AWS cost or risk.
+2. **LLM explanation only** — connected an LLM but kept it purely
+   descriptive (no decision-making power yet).
+3. **Streamlit dashboard (simulated)** — visualized the flow before
+   touching real infrastructure.
+4. **Real AWS monitoring** — replaced fake data with real `boto3` calls
+   on a Free Tier EC2 instance, with a locked-down, read-only IAM user.
+5. **Real Stop + Verify** — expanded IAM to a narrow `StopInstancesOnly`
+   custom policy, wired a real action + verification loop.
+6. **Agentic upgrade (tool calling)** — replaced the rule engine with
+   an LLM that decides via tool calling, kept for comparison as
+   `step5_agentic_ai.py`.
+7. **Full orchestration (this version)** — added Agentic RAG, memory,
+   and a reflection/self-correction loop, all coordinated through a
+   LangGraph state graph.
+
+---
+
+## Rule-Based vs. Agentic: A Direct Comparison
+
+| | Rule-based (Step 1-4) | Agentic (this version) |
+|---|---|---|
+| Who decides? | `if/else` code | The LLM, via tool calling |
+| Uses retrieved knowledge? | No | Yes (RAG) |
+| Remembers past decisions? | No | Yes (memory log) |
+| Double-checks itself? | No | Yes (reflection loop) |
+| Predictability | Fully deterministic | Reasoning-based, less rigid |
+| Caught the `runtime_hours=0` data bug? | No (wouldn't have noticed) | Yes — reflection flagged a freshly-started instance as too new to judge, exposing a real gap in the original monitoring code |
+
+That last row happened during real testing, not as a designed demo: the
+reflection step rejected a stop recommendation because the instance had
+only been running 0.09 hours, correctly reasoning that a freshly-started
+instance's CPU/training data might not be representative yet. This is a
+concrete example of the self-correction mechanism catching an edge case
+a pure rule engine would have missed.
 
 ---
 
@@ -120,29 +190,24 @@ could be tested without touching AWS or spending money:
 
 ### Prerequisites
 - Python 3.11+
-- An AWS account with a Free Tier EC2 instance running
+- An AWS account with a Free Tier EC2 instance
 - A free Groq API key ([console.groq.com](https://console.groq.com/keys))
-- AWS CLI configured (`aws configure`) with an IAM user that has:
+- AWS CLI configured (`aws configure`) with an IAM user limited to:
   - `AmazonEC2ReadOnlyAccess`
   - `CloudWatchReadOnlyAccess`
   - A custom policy allowing only `ec2:StopInstances` + `ec2:DescribeInstances`
 
 ### Install dependencies
 ```bash
-pip install boto3 groq streamlit
+pip install boto3 groq streamlit langgraph scikit-learn
 ```
 
 ### Set your Groq API key
 ```bash
-# Windows (per terminal session)
 set GROQ_API_KEY=your_key_here
-
-# To avoid re-setting it every time, add it as a permanent
-# Windows environment variable instead (System Properties -> Environment Variables).
 ```
 
 ### Tag your EC2 instance
-Add a tag to your test instance so the rule engine can evaluate it:
 ```
 Key: training_status
 Value: completed
@@ -157,20 +222,24 @@ streamlit run app.py
 
 ## Safety Notes
 
-- The IAM user used by this project has **only** the permissions it
-  needs: read instance/CloudWatch data, and stop instances. It cannot
-  launch, terminate, or modify anything else.
-- A billing alarm should be set in AWS Budgets before testing, as a
-  safety net against unexpected charges.
-- All testing was done on a single Free Tier `t2.micro` instance to
-  stay within AWS's free usage limits.
+- The IAM user has only the permissions it needs: read instance/CloudWatch
+  data, and stop instances. It cannot launch, terminate, or modify
+  anything else.
+- A billing alarm was set in AWS Budgets before testing.
+- Real AWS actions require explicit human confirmation via the dashboard
+  — the agent never acts autonomously without approval.
+- All testing was done on a single Free Tier `t2.micro` instance.
 
 ---
 
 ## Possible Future Improvements
 
-- Add more anomaly rules (oversized instance, stuck training job, etc.)
-- Track real `runtime_hours` instead of leaving it at 0
-- Add automatic (not manual) remediation for very safe/obvious cases
-- Deploy the Streamlit dashboard so it's accessible outside localhost
-- Add a history/log of past detections and actions taken
+- Add more tools (e.g. `resize_instance`, `alert_only`) so the agent
+  chooses between multiple actions, not just stop/don't-stop
+- Replace TF-IDF retrieval with embedding-based retrieval for a larger
+  knowledge base
+- Add automatic (not manual) remediation for very high-confidence,
+  low-risk cases
+- Persist memory in a real database instead of a local JSON file
+- Deploy the dashboard so it's accessible outside localhost
+

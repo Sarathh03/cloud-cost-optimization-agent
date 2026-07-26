@@ -37,7 +37,7 @@ def get_cpu_usage(instance_id, region="us-east-2"):
         StartTime=start_time,
         EndTime=end_time,
         Period=300,  # 5-minute chunks
-        Statistics=["Average"]
+        Statistics=["Average"],
     )
 
     datapoints = response.get("Datapoints", [])
@@ -74,13 +74,26 @@ def get_real_instances(region="us-east-2"):
 
             cpu = get_cpu_usage(instance_id, region) if state == "running" else 0.0
 
-            instances.append({
-                "instance_id": instance_id,
-                "state": state,
-                "cpu_percent": cpu,
-                "training_status": training_status,
-                "runtime_hours": 0  # not tracked yet, safe to leave as 0 for now
-            })
+            # Compute REAL runtime from AWS's LaunchTime, instead of
+            # hardcoding 0. This matters for the agent's reflection step:
+            # a genuinely "0 hours" instance likely just started and
+            # deserves caution, but a real several-hours-old instance
+            # showing 0 shouldn't be treated the same way.
+            runtime_hours = 0.0
+            if state == "running":
+                launch_time = inst["LaunchTime"]
+                now = datetime.now(timezone.utc)
+                runtime_hours = round((now - launch_time).total_seconds() / 3600, 2)
+
+            instances.append(
+                {
+                    "instance_id": instance_id,
+                    "state": state,
+                    "cpu_percent": cpu,
+                    "training_status": training_status,
+                    "runtime_hours": runtime_hours,
+                }
+            )
 
     return instances
 
@@ -97,7 +110,9 @@ if __name__ == "__main__":
         anomaly = detect_anomaly(instance)
 
         print(f"Instance: {instance['instance_id']}")
-        print(f"  State: {instance['state']} | CPU: {instance['cpu_percent']}% | Training: {instance['training_status']}")
+        print(
+            f"  State: {instance['state']} | CPU: {instance['cpu_percent']}% | Training: {instance['training_status']}"
+        )
 
         if anomaly:
             print("  ⚠️  ANOMALY DETECTED")
